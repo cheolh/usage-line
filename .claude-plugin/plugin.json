@@ -1,0 +1,1 @@
+{ "name": "usage-line", "version": "0.5.28", "description": "Shows context fill and rate-limit usage as a graphic band above the prompt in the Claude desktop app.", "author": { "name": "chul" }, "types": "./types/index.d.ts" }
