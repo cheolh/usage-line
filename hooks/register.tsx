@@ -85,7 +85,7 @@ export const register: Register = on => {
     const color = (p: number) => (p >= 85 ? 'hi' : p >= 60 ? 'mid' : 'lo')
     const style =
       '<style>.lbl{fill:#d3d3d3}.pct{fill:#ffffff}.trk{fill:#000000}.lo{fill:#ff1493}.mid{fill:#8a6508}.hi{fill:#e5484d}' +
-      '@media (prefers-color-scheme:light){.lbl{fill:#2c2c2c}.pct{fill:#000000}.trk{fill:#ffffff}.lo{fill:#ffb6c1}.mid{fill:#0a5adb}.hi{fill:#1ab7b2}}</style>'
+      '@media (prefers-color-scheme:light){.lbl{fill:#2c2c2c}.pct{fill:#000000}.trk{fill:#ffffff}.lo{fill:#ffb6c1}.mid{fill:#b8d4fa}.hi{fill:#1ab7b2}}</style>'
     const text = 'lbl'
     const numberColor = 'lbl'
 
