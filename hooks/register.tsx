@@ -5,17 +5,66 @@ import type { Usage } from '../types'
 
 const usage = atom({ plugin: 'usage-line', key: 'usage' } as const, null)
 
+type Limit = Usage['limits'][number]
+
+// $.session.usage() carries only the 5-hour, weekly and spend windows; the per-model weekly
+// windows (Fable) come from the usage endpoint, read with the session's own credential.
+// Asked at most once a minute; the last answer stands in between and when a read fails.
+const FABLE_TTL_MS = 60_000
+let fableCache: { at: number; limit: Limit | null } | null = null
+
+async function fableLimit($: Engine): Promise<Limit | null> {
+  const now = Date.now()
+  if (fableCache !== null && now - fableCache.at < FABLE_TTL_MS) return fableCache.limit
+
+  try {
+    const auth = await $.session.authorize()
+    if (auth === null) return fableCache?.limit ?? null
+
+    const res = await $.http.fetch('https://api.anthropic.com/api/oauth/usage?skip_spend=1', {
+      auth: auth.handle,
+      headers: { 'Content-Type': 'application/json', 'anthropic-beta': 'oauth-2025-04-20' },
+    })
+    if (!res.ok) return fableCache?.limit ?? null
+
+    const body = JSON.parse(res.text) as {
+      limits?: {
+        kind?: string
+        percent?: number
+        resets_at?: string | null
+        scope?: { model?: { display_name?: string } | null } | null
+      }[]
+    }
+    // The same match the engine uses for its "Weekly · Fable" row.
+    const row = (body.limits ?? []).find(
+      l => l.kind === 'weekly_scoped' && /^fable\b/i.test(String(l.scope?.model?.display_name ?? '')),
+    )
+    const limit: Limit | null =
+      row && typeof row.percent === 'number'
+        ? { kind: 'fable', percentUsed: row.percent, resetsAt: row.resets_at ?? null }
+        : null
+
+    fableCache = { at: now, limit }
+    return limit
+  } catch {
+    return fableCache?.limit ?? null
+  }
+}
+
 async function measure($: Engine): Promise<Usage> {
-  const { context, rateLimits, cost } = await $.session.usage()
+  const [{ context, rateLimits, cost }, fable] = await Promise.all([$.session.usage(), fableLimit($)])
+
+  const limits: Limit[] = rateLimits.map(l => ({
+    kind: l.kind,
+    percentUsed: l.percentUsed,
+    resetsAt: l.resetsAt ?? null,
+  }))
+  if (fable !== null) limits.push(fable)
 
   return {
     percent: context.percent ?? null,
     usd: cost?.usd ?? null,
-    limits: rateLimits.map(l => ({
-      kind: l.kind,
-      percentUsed: l.percentUsed,
-      resetsAt: l.resetsAt ?? null,
-    })),
+    limits,
   }
 }
 
@@ -57,6 +106,7 @@ export const register: Register = on => {
     const names: Record<string, string> = {
       five_hour: '5H',
       seven_day: '1W',
+      fable: 'Fable',
       spend_limit: 'Spend',
     }
     const nameOf = (kind: string) => names[kind] ?? kind.replace(/_/g, ' ')
