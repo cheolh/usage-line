@@ -1,65 +1,80 @@
 import { atom, read, update } from 'claude-code'
 import type { Engine, Register } from 'claude-code'
 
-import type { Usage } from '../types'
+import type { FableState, Usage } from '../types'
 
 const usage = atom({ plugin: 'usage-line', key: 'usage' } as const, null)
+const fableState = atom({ plugin: 'usage-line', key: 'fable' } as const, null)
 
 type Limit = Usage['limits'][number]
 
 // $.session.usage() carries only the 5-hour, weekly and spend windows; the per-model weekly
 // windows (Fable) come from the usage endpoint, read with the session's own credential.
-// Asked at most once a minute; the last answer stands in between and when a read fails.
-const FABLE_TTL_MS = 60_000
-let fableCache: { at: number; limit: Limit | null } | null = null
+// The endpoint is rate limited (the app reads it too), so it is asked at most every five
+// minutes, later when a 429 says so. The last good reading and the time of the next allowed
+// read live in the plugin's state, so a plugin reload neither loses one nor re-asks early.
+const FABLE_EVERY_MS = 5 * 60_000
 
-async function fableLimit($: Engine): Promise<Limit | null> {
+async function readFable($: Engine): Promise<FableState> {
   const now = Date.now()
-  if (fableCache !== null && now - fableCache.at < FABLE_TTL_MS) return fableCache.limit
+  const s: FableState = (await read($, fableState)) ?? { limit: null, known: false, nextAt: 0 }
+  if (now < s.nextAt) return s
 
+  let next: FableState = { ...s, nextAt: now + FABLE_EVERY_MS }
+  // Claim the read before it goes out, so a hook firing meanwhile does not send a second one.
+  await update($, fableState, () => next)
   try {
     const auth = await $.session.authorize()
-    if (auth === null) return fableCache?.limit ?? null
-
-    const res = await $.http.fetch('https://api.anthropic.com/api/oauth/usage?skip_spend=1', {
-      auth: auth.handle,
-      headers: { 'Content-Type': 'application/json', 'anthropic-beta': 'oauth-2025-04-20' },
-    })
-    if (!res.ok) return fableCache?.limit ?? null
-
-    const body = JSON.parse(res.text) as {
-      limits?: {
-        kind?: string
-        percent?: number
-        resets_at?: string | null
-        scope?: { model?: { display_name?: string } | null } | null
-      }[]
+    if (auth !== null) {
+      const res = await $.http.fetch('https://api.anthropic.com/api/oauth/usage?skip_spend=1', {
+        auth: auth.handle,
+        headers: { 'Content-Type': 'application/json', 'anthropic-beta': 'oauth-2025-04-20' },
+      })
+      if (res.status === 429) {
+        const wait = Number(res.headers['retry-after']) * 1000
+        if (wait > FABLE_EVERY_MS) next.nextAt = now + wait
+      } else if (res.ok) {
+        const body = JSON.parse(res.text) as {
+          limits?: {
+            kind?: string
+            percent?: number
+            resets_at?: string | null
+            scope?: { model?: { display_name?: string } | null } | null
+          }[]
+        }
+        // The same match the engine uses for its "Weekly · Fable" row.
+        const row = (body.limits ?? []).find(
+          l => l.kind === 'weekly_scoped' && /^fable\b/i.test(String(l.scope?.model?.display_name ?? '')),
+        )
+        next = {
+          ...next,
+          known: true,
+          limit:
+            row && typeof row.percent === 'number'
+              ? { kind: 'fable', percentUsed: row.percent, resetsAt: row.resets_at ?? null }
+              : null,
+        }
+      }
     }
-    // The same match the engine uses for its "Weekly · Fable" row.
-    const row = (body.limits ?? []).find(
-      l => l.kind === 'weekly_scoped' && /^fable\b/i.test(String(l.scope?.model?.display_name ?? '')),
-    )
-    const limit: Limit | null =
-      row && typeof row.percent === 'number'
-        ? { kind: 'fable', percentUsed: row.percent, resetsAt: row.resets_at ?? null }
-        : null
+  } catch {}
 
-    fableCache = { at: now, limit }
-    return limit
-  } catch {
-    return fableCache?.limit ?? null
-  }
+  await update($, fableState, () => next)
+  return next
 }
 
 async function measure($: Engine): Promise<Usage> {
-  const [{ context, rateLimits, cost }, fable] = await Promise.all([$.session.usage(), fableLimit($)])
+  const [{ context, rateLimits, cost }, fable] = await Promise.all([$.session.usage(), readFable($)])
 
   const limits: Limit[] = rateLimits.map(l => ({
     kind: l.kind,
     percentUsed: l.percentUsed,
     resetsAt: l.resetsAt ?? null,
   }))
-  if (fable !== null) limits.push(fable)
+  // A reading whose window has already reset says nothing about the new one.
+  const stale = fable.limit?.resetsAt != null && Date.parse(fable.limit.resetsAt) <= Date.now()
+  if (fable.limit !== null && !stale) limits.push(fable.limit)
+  // Not read yet (or stale): keep the bar in place, with no number, rather than dropping it.
+  else if (!fable.known || stale) limits.push({ kind: 'fable', percentUsed: null, resetsAt: null })
 
   return {
     percent: context.percent ?? null,
@@ -129,7 +144,8 @@ export const register: Register = on => {
     const meters: [string, number | null, string][] = []
 
     if (u.percent !== null) meters.push(['Context', u.percent, ''])
-    for (const l of u.limits) meters.push([nameOf(l.kind), l.percentUsed, resetText(l.resetsAt)])
+    // Fable resets with the weekly window, so its time left would only repeat 1W's.
+    for (const l of u.limits) meters.push([nameOf(l.kind), l.percentUsed, l.kind === 'fable' ? '' : resetText(l.resetsAt)])
 
     // Colors live in the SVG's own stylesheet: dark values by default, every color inverted when the viewer prefers light.
     const color = (p: number) => (p >= 85 ? 'hi' : p >= 60 ? 'mid' : 'lo')
@@ -152,9 +168,10 @@ export const register: Register = on => {
     const space = 8
     const barW = 80
     const H = 20
-    // Vertical center of the bars, and the text baseline (tuned by eye, in px from the top).
+    // Vertical center of the bars, and the text baseline (in px from the top): at 15.3 the
+    // labels' ink centers on the bar's center, as the percent inside the bar does.
     const mid = 11
-    const base = 14.3
+    const base = 15.3
     // Engraved look: a white copy of each text sits 1px below it, like light catching a recessed edge.
     const engraved = (x: number, y: number, fill: string, opacity: number, f: string, content: string) =>
       `<text x="${x}" y="${y}" class="${fill}" fill-opacity="${opacity}" ${f}>${content}</text>`
@@ -168,7 +185,7 @@ export const register: Register = on => {
       const barX = x + label.length * charW + space
       const fill = p === null ? 0 : Math.max(0, Math.min(barW, (p / 100) * barW))
       // The % sign is drawn smaller than the number.
-      const shown = p === null ? '' : `${Math.round(p)}<tspan font-size="13">%</tspan>`
+      const shown = p === null ? '–' : `${Math.round(p)}<tspan font-size="13">%</tspan>`
 
       body +=
         engraved(x, base, text, 1, font, label) +
