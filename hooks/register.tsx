@@ -151,7 +151,11 @@ export const register: Register = on => {
     const color = (p: number) => (p >= 85 ? 'hi' : p >= 60 ? 'mid' : 'lo')
     const style =
       '<style>.lbl{fill:#d3d3d3}.pct{fill:#ffffff}.trk{fill:#000000}.lo{fill:#ff1493}.mid{fill:#8a6508}.hi{fill:#e5484d}' +
-      '@media (prefers-color-scheme:light){.lbl{fill:#2c2c2c}.pct{fill:#000000}.trk{fill:#ffffff}.lo{fill:#ffb6c1}.mid{fill:#b8d4fa}.hi{fill:#1ab7b2}}</style>'
+      '.l-ctx{fill:#7cc4ff}.l-5h{fill:#7ee0a1}.l-1w{fill:#ffc069}.l-fable{fill:#c9a2ff}.l-5h,.l-1w{font-weight:bold}' +
+      '@media (prefers-color-scheme:light){.lbl{fill:#2c2c2c}.pct{fill:#000000}.trk{fill:#ffffff}.lo{fill:#ffb6c1}.mid{fill:#b8d4fa}.hi{fill:#1ab7b2}' +
+      '.l-ctx{fill:#1f6fb5}.l-5h{fill:#1e8a4c}.l-1w{fill:#a86400}.l-fable{fill:#7a3fc2}}</style>'
+    // Each meter's label has its own color: blue, green, amber, purple; any other label stays plain.
+    const labelClass: Record<string, string> = { Context: 'l-ctx', '5H': 'l-5h', '1W': 'l-1w', Fable: 'l-fable' }
     const text = 'lbl'
     const numberColor = 'lbl'
 
@@ -188,7 +192,7 @@ export const register: Register = on => {
       const shown = p === null ? '–' : `${Math.round(p)}<tspan font-size="13">%</tspan>`
 
       body +=
-        engraved(x, base, text, 1, font, label) +
+        engraved(x, base, labelClass[label] ?? text, 1, font, label) +
         `<rect x="${barX}" y="${mid - 8}" width="${barW}" height="16" rx="4" class="trk"/>` +
         // The fill is square-cut on its right edge and clipped to the track's rounded outline on the left.
         `<clipPath id="track${i}"><rect x="${barX}" y="${mid - 8}" width="${barW}" height="16" rx="4"/></clipPath>` +
